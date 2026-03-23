@@ -113,7 +113,7 @@ def preparer_audio_exact(fichier_audio):
 
     # Filtrage passe-bande 100-2000 Hz
     nyquist = TARGET_SR / 2
-    b, a = signal.butter(4, [100/nyquist, 2000/nyquist], btype='band')
+    b, a = signal.butter(4, [250/nyquist, 2000/nyquist], btype='band')
     y = signal.filtfilt(b, a, y).astype(np.float32)
 
     # Standardisation durée à 5s
