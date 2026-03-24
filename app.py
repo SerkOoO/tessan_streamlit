@@ -10,19 +10,24 @@ import json
 import io
 from snowflake.snowpark import Session
 import librosa.display
+import os
+from dotenv import load_dotenv
 
 # ==========================================
 # 1. CONFIGURATION ET CONNEXION SNOWFLAKE
 # ==========================================
 st.set_page_config(page_title="Tessan - IA Respiratoire", page_icon="🩺", layout="wide")
 
+load_dotenv()
+
 @st.cache_resource
 def init_snowpark():
-    # /!\  /!\
+    # /!\ TES IDENTIFIANTS /!\
     connection_parameters = {
-        "account": "SFEDU02-DYB15780",
-        "user": "CATFISH",
-        "password": "xZBYnNkTQ62NdqXS",
+        "account": os.getenv("ACCOUNT"),
+        "user": os.getenv("USER"),
+        "password": os.getenv("PASSWORD"),
+        "passcode": "574179", # important à changer
         "role": "M2_BIGDATA_EQUIPE_1_ROLE",
         "warehouse": "HACKATHON_WH",
         "database": "M2_BIGDATA_EQUIPE_1_DB",
@@ -30,11 +35,13 @@ def init_snowpark():
     }
     return Session.builder.configs(connection_parameters).create()
 
+# Initialisation sécurisée de la session
+session = None
 try:
     session = init_snowpark()
     st.sidebar.success("✅ Connecté à Snowflake")
 except Exception as e:
-    st.sidebar.error("❌ Snowflake non connecté (mode local)")
+    st.sidebar.error(f"❌ Erreur Snowflake : {e}")  # <-- Ceci va afficher le vrai problème !
 
 # --- CAPTEURS DE LA CABINE ---
 st.sidebar.header("🎛️ Capteurs de la cabine (Direct)")
@@ -99,7 +106,6 @@ def creer_filtres_mel(sr, n_fft, n_mels, n_freqs):
     return filters
 
 def preparer_audio_exact(fichier_audio):
-    # Lecture sécurisée depuis le composant Streamlit
     audio_bytes = fichier_audio.read()
     sr_orig, y = wav.read(io.BytesIO(audio_bytes))
     
@@ -111,23 +117,20 @@ def preparer_audio_exact(fichier_audio):
         nb_samples_cible = int(len(y) * TARGET_SR / sr_orig)
         y = signal.resample(y, nb_samples_cible)
 
-    # Filtrage passe-bande 100-2000 Hz
     nyquist = TARGET_SR / 2
     b, a = signal.butter(4, [250/nyquist, 2000/nyquist], btype='band')
     y = signal.filtfilt(b, a, y).astype(np.float32)
 
-    # Standardisation durée à 5s
     TARGET_LENGTH = TARGET_SR * 5
     if np.max(np.abs(y)) > 0: y = y / np.max(np.abs(y))
     if len(y) > TARGET_LENGTH: y = y[:TARGET_LENGTH]
     elif len(y) < TARGET_LENGTH: y = np.pad(y, (0, TARGET_LENGTH - len(y)), mode='constant')
 
-    # Spectrogramme fait maison
     _, _, Sxx = signal.spectrogram(y, fs=TARGET_SR, nperseg=2048, noverlap=2048 - 512, window='hann')
     mel_filters = creer_filtres_mel(TARGET_SR, 2048, 128, Sxx.shape[0])
     mel_db = 10 * np.log10(np.maximum(np.dot(mel_filters, Sxx), 1e-10))
 
-    # Z-Score
+    # Z-Score global ajusté pour la démo
     mel_norm = (mel_db - np.mean(mel_db)) / (np.std(mel_db) + 1e-10)
     return mel_norm, mel_db
 
@@ -194,15 +197,18 @@ if audio_data is not None:
         st.markdown(f"**Niveau de Sévérité estimé :** :{couleur}[{severite}]")
         
         if st.button("💾 Synchroniser avec le dossier Patient (Snowflake)"):
-            try:
-                p_json = json.dumps({CLASSES[i]: float(probs[i]) for i in range(5)})
-                session.sql(f"""
-                    INSERT INTO PREDICTIONS (PHARMACIE_ID, CLASSE_PREDITE, PROBABILITES, CONFIANCE)
-                    SELECT 'CABINE_TEST', '{CLASSES[idx]}', PARSE_JSON('{p_json}'), {float(confiance)}
-                """).collect()
-                st.toast('✅ Données enregistrées dans Snowflake avec succès !')
-            except Exception as e:
-                st.error(f"Erreur Snowflake : {e}")
+            if session is not None:  # <--- VÉRIFICATION DE SÉCURITÉ ICI
+                try:
+                    p_json = json.dumps({CLASSES[i]: float(probs[i]) for i in range(5)})
+                    session.sql(f"""
+                        INSERT INTO PREDICTIONS (PHARMACIE_ID, CLASSE_PREDITE, PROBABILITES, CONFIANCE)
+                        SELECT 'CABINE_TEST', '{CLASSES[idx]}', PARSE_JSON('{p_json}'), {float(confiance)}
+                    """).collect()
+                    st.toast('✅ Données enregistrées dans Snowflake avec succès !')
+                except Exception as e:
+                    st.error(f"Erreur Snowflake : {e}")
+            else:
+                st.error("⚠️ Sauvegarde impossible : non connecté à Snowflake.")
 
     with col_b:
         if severite == "SÉVÈRE (Alerte Rouge)":
@@ -215,11 +221,38 @@ if audio_data is not None:
             else:
                 st.info("ℹ️ PATHOLOGIE DÉTECTÉE MAIS CONSTANTES STABLES.\n- Pas de détresse immédiate (SpO2 normale).\n- Recommandation : suivi médical régulier.")
 
-    # --- DASHBOARD LONGITUDINAL ---
-    with st.expander("📈 Voir l'historique pulmonaire du patient (Suivi de maladie chronique)"):
-        st.markdown("*(Données extraites depuis Snowflake pour le Patient ID #10948)*")
-        dates = pd.date_range(end=pd.Timestamp.today(), periods=6, freq='M')
-        historique_probs = [15, 22, 65, 85, 40, confiance]
-        df_history = pd.DataFrame({"Date": dates, "Probabilité d'obstruction bronchique (%)": historique_probs})
-        st.line_chart(df_history.set_index("Date"))
-        st.caption("Cette vue permet au médecin d'anticiper les dégradations avant une crise aiguë.")
+    # ==========================================
+    # --- DASHBOARD LONGITUDINAL RÉEL ---
+    # ==========================================
+    with st.expander("📈 Voir l'historique pulmonaire du patient (Extraction Snowflake en temps réel)"):
+        if session is not None:
+            try:
+                # On requête Snowflake pour extraire TOUTES les probabilités du JSON
+                query = """
+                    SELECT 
+                        TIMESTAMP as "Date", 
+                        PROBABILITES:Asthme::FLOAT as "Asthme",
+                        PROBABILITES:BPCO::FLOAT as "BPCO",
+                        PROBABILITES:Bronchite::FLOAT as "Bronchite",
+                        PROBABILITES:Pneumonie::FLOAT as "Pneumonie",
+                        PROBABILITES:Sain::FLOAT as "Sain"
+                    FROM PREDICTIONS 
+                    ORDER BY TIMESTAMP ASC
+                """
+                df_history = session.sql(query).to_pandas()
+                
+                if not df_history.empty:
+                    # Convertir la colonne en format Date pour Streamlit
+                    df_history['Date'] = pd.to_datetime(df_history['Date'])
+                    
+                    # Définir la Date comme index pour que Streamlit trace les 5 courbes correctement
+                    df_history = df_history.set_index('Date')
+                    
+                    st.line_chart(df_history)
+                    st.caption("Cette vue permet au médecin de suivre l'évolution de toutes les pathologies simultanément.")
+                else:
+                    st.info("Aucun historique patient disponible dans la base de données. Sauvegardez une prédiction pour commencer le suivi.")
+            except Exception as e:
+                st.error(f"Erreur lors de la récupération de l'historique : {e}")
+        else:
+            st.info("🖥️ Mode Local Actif : Historique désactivé. Connectez-vous à Snowflake pour voir le suivi.")
