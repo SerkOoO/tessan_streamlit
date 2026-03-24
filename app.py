@@ -22,12 +22,12 @@ load_dotenv()
 
 @st.cache_resource
 def init_snowpark():
-    # /!\ TES IDENTIFIANTS /!\
+    # /!\ IDENTIFIANTS /!\
     connection_parameters = {
         "account": os.getenv("ACCOUNT"),
         "user": os.getenv("USER"),
         "password": os.getenv("PASSWORD"),
-        "passcode": "435579", # important à changer
+        "passcode": "263550", # important à changer
         "role": "M2_BIGDATA_EQUIPE_1_ROLE",
         "warehouse": "HACKATHON_WH",
         "database": "M2_BIGDATA_EQUIPE_1_DB",
