@@ -27,7 +27,7 @@ def init_snowpark():
         "account": os.getenv("ACCOUNT"),
         "user": os.getenv("USER"),
         "password": os.getenv("PASSWORD"),
-        "passcode": "574179", # important à changer
+        "passcode": "435579", # important à changer
         "role": "M2_BIGDATA_EQUIPE_1_ROLE",
         "warehouse": "HACKATHON_WH",
         "database": "M2_BIGDATA_EQUIPE_1_DB",
@@ -41,7 +41,7 @@ try:
     session = init_snowpark()
     st.sidebar.success("✅ Connecté à Snowflake")
 except Exception as e:
-    st.sidebar.error(f"❌ Erreur Snowflake : {e}")  # <-- Ceci va afficher le vrai problème !
+    st.sidebar.error(f"❌ Erreur Snowflake : {e}") 
 
 # --- CAPTEURS DE LA CABINE ---
 st.sidebar.header("🎛️ Capteurs de la cabine (Direct)")
@@ -117,8 +117,9 @@ def preparer_audio_exact(fichier_audio):
         nb_samples_cible = int(len(y) * TARGET_SR / sr_orig)
         y = signal.resample(y, nb_samples_cible)
 
+    # Filtrage passe-bande standard (100 - 2000 Hz)
     nyquist = TARGET_SR / 2
-    b, a = signal.butter(4, [250/nyquist, 2000/nyquist], btype='band')
+    b, a = signal.butter(4, [100/nyquist, 2000/nyquist], btype='band')
     y = signal.filtfilt(b, a, y).astype(np.float32)
 
     TARGET_LENGTH = TARGET_SR * 5
@@ -197,7 +198,7 @@ if audio_data is not None:
         st.markdown(f"**Niveau de Sévérité estimé :** :{couleur}[{severite}]")
         
         if st.button("💾 Synchroniser avec le dossier Patient (Snowflake)"):
-            if session is not None:  # <--- VÉRIFICATION DE SÉCURITÉ ICI
+            if session is not None: 
                 try:
                     p_json = json.dumps({CLASSES[i]: float(probs[i]) for i in range(5)})
                     session.sql(f"""
