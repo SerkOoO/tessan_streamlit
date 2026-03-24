@@ -22,7 +22,7 @@ Pour isoler les dépendances du projet et éviter les conflits avec votre systè
 Ouvrez votre terminal et clonez le projet (ou téléchargez les fichiers) :
 ```bash
 git clone https://github.com/SerkOoO/tessan_streamlit.git
-cd <NOM_DU_DOSSIER> 
+cd tessan_streamlit
 ```
 
 ### 2. Créer l'environnement virtuel (.venv)
