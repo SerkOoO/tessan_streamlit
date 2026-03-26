@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import scipy.io.wavfile as wav
 import scipy.signal as signal
 import matplotlib.pyplot as plt
@@ -27,7 +28,7 @@ def init_snowpark():
         "account": os.getenv("ACCOUNT"),
         "user": os.getenv("USER"),
         "password": os.getenv("PASSWORD"),
-        "passcode": "263550", # important à changer
+        "passcode": os.getenv("PASSWORD"), # important à changer
         "role": "M2_BIGDATA_EQUIPE_1_ROLE",
         "warehouse": "HACKATHON_WH",
         "database": "M2_BIGDATA_EQUIPE_1_DB",
@@ -135,6 +136,46 @@ def preparer_audio_exact(fichier_audio):
     mel_norm = (mel_db - np.mean(mel_db)) / (np.std(mel_db) + 1e-10)
     return mel_norm, mel_db
 
+
+
+def generate_gradcam(model, tensor_input, target_class_idx=None):
+    model.eval()
+    activations = []
+
+    # On met un crochet pour capturer l'image directement à la sortie du CNN (avant le LSTM)
+    def forward_hook(module, input, output):
+        activations.append(output)
+
+    # On s'accroche à la dernière couche d'activation ReLU du CNN (index 10)
+    handle = model.cnn[10].register_forward_hook(forward_hook)
+
+    # On fait passer le son (juste en marche avant, pas de backward compliqué)
+    with torch.no_grad():
+        _ = model(tensor_input)
+
+    handle.remove()
+
+    # On récupère l'image vue par le CNN
+    acts = activations[0].squeeze(0)  # Shape: [128 filtres, H, W]
+
+    # On fait la moyenne de tous les filtres pour voir les zones qui "réagissent" le plus au son
+    heatmap = torch.mean(acts, dim=0)
+
+    # Normalisation propre entre 0 et 1 pour forcer l'apparition du Rouge/Jaune
+    heatmap = F.relu(heatmap)
+    heatmap_min, heatmap_max = torch.min(heatmap), torch.max(heatmap)
+    if heatmap_max - heatmap_min > 1e-8:
+        heatmap = (heatmap - heatmap_min) / (heatmap_max - heatmap_min)
+    else:
+        heatmap = torch.zeros_like(heatmap)
+
+    # On étire la carte pour qu'elle fasse la taille de ton spectrogramme (128, 212)
+    original_shape = (tensor_input.shape[2], tensor_input.shape[3])
+    heatmap = heatmap.unsqueeze(0).unsqueeze(0)
+    heatmap_resized = F.interpolate(heatmap, size=original_shape, mode='bilinear', align_corners=False)
+
+    return heatmap_resized[0, 0].cpu().numpy()
+
 # ==========================================
 # 4. INTERFACE PRODUIT
 # ==========================================
@@ -177,6 +218,30 @@ if audio_data is not None:
             
             idx = np.argmax(probs)
             confiance = probs[idx]
+    # -----------------------------------------------------
+    # BLOC GRAD-CAM
+    # -----------------------------------------------------
+    st.divider()
+    with st.expander("🔍 Explicabilité de l'IA (Grad-CAM) - Pourquoi ce diagnostic ?", expanded=True):
+        st.markdown(f"**Analyse des biomarqueurs spatiaux pour la classe : `{CLASSES[idx]}`**")
+        st.caption("Cette carte de chaleur met en évidence les fréquences et les instants précis (en rouge/jaune) qui ont convaincu le réseau de neurones de son diagnostic. Le médecin ne se fie plus à une boîte noire.")
+        
+        cam_heatmap = generate_gradcam(model, tensor_input, idx)
+        
+        fig3, ax3 = plt.subplots(figsize=(10, 4))
+        
+        img_bg = ax3.imshow(mel_db, aspect='auto', origin='lower', cmap='gray')
+        
+        # 2. On applique le masque pour que le bleu foncé devienne invisible
+        cam_heatmap_masked = np.ma.masked_where(cam_heatmap < 0.3, cam_heatmap)
+        
+        img_heatmap = ax3.imshow(cam_heatmap_masked, aspect='auto', origin='lower', cmap='jet', alpha=0.6)
+        
+        ax3.set_xlabel('Temps')
+        ax3.set_ylabel('Fréquence (Mel)')
+        
+        st.pyplot(fig3)
+    # -----------------------------------------------------
             
     st.divider()
     st.markdown("### 📋 Synthèse Clinique & Sévérité Multimodale")
