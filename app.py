@@ -11,6 +11,9 @@ import json
 import io
 from snowflake.snowpark import Session
 import librosa.display
+import speech_recognition as sr
+from gtts import gTTS
+import base64
 import os
 from dotenv import load_dotenv
 
@@ -28,7 +31,7 @@ def init_snowpark():
         "account": os.getenv("ACCOUNT"),
         "user": os.getenv("USER"),
         "password": os.getenv("PASSWORD"),
-        "passcode": os.getenv("PASSWORD"), # important à changer
+        "passcode": os.getenv("PASSCODE"),
         "role": "M2_BIGDATA_EQUIPE_1_ROLE",
         "warehouse": "HACKATHON_WH",
         "database": "M2_BIGDATA_EQUIPE_1_DB",
@@ -176,149 +179,274 @@ def generate_gradcam(model, tensor_input, target_class_idx=None):
 
     return heatmap_resized[0, 0].cpu().numpy()
 
+def faire_parler_ia(texte):
+    # Génère l'audio en français
+    tts = gTTS(text=texte, lang='fr')
+    fp = io.BytesIO()
+    tts.write_to_fp(fp)
+    fp.seek(0)
+    # Convertit en base64 pour forcer la lecture automatique en HTML
+    b64 = base64.b64encode(fp.read()).decode()
+    md = f"""
+        <audio autoplay="true">
+        <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
+        </audio>
+        """
+    st.markdown(md, unsafe_allow_html=True)
+
 # ==========================================
 # 4. INTERFACE PRODUIT
 # ==========================================
 
 st.title("🩺 Cabine Connectée Tessan - Diagnostic IA Multimodal") 
 
-choix_entree = st.radio("Acquisition du signal :", ["📂 Uploader une auscultation (.wav)", "🎤 Stéthoscope Connecté (Temps réel)"], horizontal=True)
+# --- GESTIONNAIRE DE SCÉNARIO ---
+if 'etape_consultation' not in st.session_state:
+    st.session_state.etape_consultation = 0
+if 'fumeur_text' not in st.session_state:
+    st.session_state.fumeur_text = ""
+if 'symptomes_text' not in st.session_state:
+    st.session_state.symptomes_text = ""
+if 'audio_ia_a_jouer' not in st.session_state:
+    st.session_state.audio_ia_a_jouer = None
 
-audio_data = None
-if choix_entree == "📂 Uploader une auscultation (.wav)":
-    audio_data = st.file_uploader("📥 Charger un fichier", type=["wav"])
-else:
-    st.info("Placez le stéthoscope sur le patient (ou le micro contre votre gorge) et respirez doucement.")
-    audio_data = st.audio_input("Enregistrer l'auscultation")
+# Fonction pour préparer l'audio de l'IA (Text-To-Speech)
+def preparer_audio_ia(texte):
+    tts = gTTS(text=texte, lang='fr')
+    fp = io.BytesIO()
+    tts.write_to_fp(fp)
+    fp.seek(0)
+    b64 = base64.b64encode(fp.read()).decode()
+    return f"""
+        <audio autoplay="true">
+        <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
+        </audio>
+        """
 
-if audio_data is not None:
-    mel_norm, mel_db = preparer_audio_exact(audio_data)
+# Lecture automatique du son généré à l'étape précédente
+if st.session_state.audio_ia_a_jouer:
+    st.markdown(st.session_state.audio_ia_a_jouer, unsafe_allow_html=True)
+    st.session_state.audio_ia_a_jouer = None
+
+# ==============================================================
+# LE BOUTON DE DÉMARRAGE
+# ==============================================================
+if st.session_state.etape_consultation == 0:
+    st.markdown("### 🤖 Étape 1 : Assistant Médical Vocal")
+    st.info("Bienvenue dans la cabine Tessan. Cliquez ci-dessous pour lancer la consultation.")
+    if st.button("▶️ Démarrer la consultation"):
+        st.session_state.audio_ia_a_jouer = preparer_audio_ia("Bonjour. Je suis l'assistant médical de la cabine. Pour commencer, êtes-vous fumeur ?")
+        st.session_state.etape_consultation = 1
+        st.rerun()
+
+# ==============================================================
+# QUESTION 1 (FUMEUR)
+# ==============================================================
+elif st.session_state.etape_consultation == 1:
+    st.markdown("### 🤖 Étape 1 : Assistant Médical Vocal")
+    st.warning("🗣️ L'IA : 'Bonjour. Je suis l'assistant médical de la cabine. Pour commencer, êtes-vous fumeur ?'")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("📊 Signature Acoustique")
-        st.audio(audio_data, format='audio/wav')
-        fig, ax = plt.subplots(figsize=(10, 5))
-        librosa.display.specshow(mel_db, sr=22050, x_axis='time', y_axis='mel', ax=ax, cmap='inferno')
-        st.pyplot(fig)
-
-    with col2:
-        st.subheader("🧠 Pré-diagnostic IA")
-        tensor_input = torch.tensor(mel_norm[np.newaxis, np.newaxis, :, :], dtype=torch.float32)
-        
-        with st.spinner('Analyse des biomarqueurs en cours...'):
-            with torch.no_grad():
-                outputs = model(tensor_input)
-                probs = torch.softmax(outputs, dim=1)[0].numpy() * 100
-            
-            fig2, ax2 = plt.subplots(figsize=(6, 4))
-            ax2.barh(CLASSES, probs, color=['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd'])
-            ax2.set_xlabel('Probabilité (%)')
-            st.pyplot(fig2)
-            
-            idx = np.argmax(probs)
-            confiance = probs[idx]
-    # -----------------------------------------------------
-    # BLOC GRAD-CAM
-    # -----------------------------------------------------
-    st.divider()
-    with st.expander("🔍 Explicabilité de l'IA (Grad-CAM) - Pourquoi ce diagnostic ?", expanded=True):
-        st.markdown(f"**Analyse des biomarqueurs spatiaux pour la classe : `{CLASSES[idx]}`**")
-        st.caption("Cette carte de chaleur met en évidence les fréquences et les instants précis (en rouge/jaune) qui ont convaincu le réseau de neurones de son diagnostic. Le médecin ne se fie plus à une boîte noire.")
-        
-        cam_heatmap = generate_gradcam(model, tensor_input, idx)
-        
-        fig3, ax3 = plt.subplots(figsize=(10, 4))
-        
-        img_bg = ax3.imshow(mel_db, aspect='auto', origin='lower', cmap='gray')
-        
-        # 2. On applique le masque pour que le bleu foncé devienne invisible
-        cam_heatmap_masked = np.ma.masked_where(cam_heatmap < 0.3, cam_heatmap)
-        
-        img_heatmap = ax3.imshow(cam_heatmap_masked, aspect='auto', origin='lower', cmap='jet', alpha=0.6)
-        
-        ax3.set_xlabel('Temps')
-        ax3.set_ylabel('Fréquence (Mel)')
-        
-        st.pyplot(fig3)
-    # -----------------------------------------------------
-            
-    st.divider()
-    st.markdown("### 📋 Synthèse Clinique & Sévérité Multimodale")
+    audio_fumeur = st.audio_input("🎤 Répondez à l'IA (ex: 'Non, je ne fume pas' ou 'Oui, un paquet par jour')")
     
-    severite = "LÉGER"
-    couleur = "green"
-    
-    if CLASSES[idx] in ['Pneumonie', 'BPCO', 'Asthme']:
-        if spo2 < 92 or temperature > 38.5:
-            severite = "SÉVÈRE (Alerte Rouge)"
-            couleur = "red"
-        elif spo2 < 95 or temperature > 37.8:
-            severite = "MODÉRÉ (Alerte Orange)"
-            couleur = "orange"
-            
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.metric(label="Diagnostic principal ciblé", value=f"{CLASSES[idx]}", delta=f"Confiance IA : {confiance:.1f}%")
-        st.markdown(f"**Niveau de Sévérité estimé :** :{couleur}[{severite}]")
-        
-        if st.button("💾 Synchroniser avec le dossier Patient (Snowflake)"):
-            if session is not None: 
-                try:
-                    p_json = json.dumps({CLASSES[i]: float(probs[i]) for i in range(5)})
-                    session.sql(f"""
-                        INSERT INTO PREDICTIONS (PHARMACIE_ID, CLASSE_PREDITE, PROBABILITES, CONFIANCE)
-                        SELECT 'CABINE_TEST', '{CLASSES[idx]}', PARSE_JSON('{p_json}'), {float(confiance)}
-                    """).collect()
-                    st.toast('✅ Données enregistrées dans Snowflake avec succès !')
-                except Exception as e:
-                    st.error(f"Erreur Snowflake : {e}")
-            else:
-                st.error("⚠️ Sauvegarde impossible : non connecté à Snowflake.")
-
-    with col_b:
-        if severite == "SÉVÈRE (Alerte Rouge)":
-            st.error("🚨 DÉTRESSE RESPIRATOIRE SUSPECTÉE.\n- Hypoxie ou fièvre détectée par la cabine.\n- Redirection immédiate vers les urgences (15).")
-        elif severite == "MODÉRÉ (Alerte Orange)":
-            st.warning("⚠️ ANOMALIE CLINIQUE CONFIRMÉE.\n- Téléconsultation prioritaire avec un médecin généraliste requise.\n- Prescription probable.")
-        else:
-            if CLASSES[idx] == 'Sain':
-                st.success("✅ PARAMÈTRES NORMAUX.\n- Auscultation claire, constantes stables.\n- Fin de consultation classique.")
-            else:
-                st.info("ℹ️ PATHOLOGIE DÉTECTÉE MAIS CONSTANTES STABLES.\n- Pas de détresse immédiate (SpO2 normale).\n- Recommandation : suivi médical régulier.")
-
-    # ==========================================
-    # --- DASHBOARD LONGITUDINAL RÉEL ---
-    # ==========================================
-    with st.expander("📈 Voir l'historique pulmonaire du patient (Extraction Snowflake en temps réel)"):
-        if session is not None:
+    if audio_fumeur is not None:
+        with st.spinner("L'IA transcrit votre voix..."):
+            r = sr.Recognizer()
+            with sr.AudioFile(audio_fumeur) as source:
+                audio_data_sr = r.record(source)
             try:
-                # On requête Snowflake pour extraire TOUTES les probabilités du JSON
-                query = """
-                    SELECT 
-                        TIMESTAMP as "Date", 
-                        PROBABILITES:Asthme::FLOAT as "Asthme",
-                        PROBABILITES:BPCO::FLOAT as "BPCO",
-                        PROBABILITES:Bronchite::FLOAT as "Bronchite",
-                        PROBABILITES:Pneumonie::FLOAT as "Pneumonie",
-                        PROBABILITES:Sain::FLOAT as "Sain"
-                    FROM PREDICTIONS 
-                    ORDER BY TIMESTAMP ASC
-                """
-                df_history = session.sql(query).to_pandas()
+                texte_transcrit = r.recognize_google(audio_data_sr, language="fr-FR")
+                st.session_state.fumeur_text = texte_transcrit
                 
-                if not df_history.empty:
-                    # Convertir la colonne en format Date pour Streamlit
-                    df_history['Date'] = pd.to_datetime(df_history['Date'])
-                    
-                    # Définir la Date comme index pour que Streamlit trace les 5 courbes correctement
-                    df_history = df_history.set_index('Date')
-                    
-                    st.line_chart(df_history)
-                    st.caption("Cette vue permet au médecin de suivre l'évolution de toutes les pathologies simultanément.")
+                # On prépare la question 2
+                st.session_state.audio_ia_a_jouer = preparer_audio_ia("D'accord, c'est noté. Pouvez-vous maintenant me décrire vos symptômes ?")
+                st.session_state.etape_consultation = 2
+                st.rerun()
+            except sr.UnknownValueError:
+                st.error("L'IA n'a pas bien compris. Pouvez-vous répéter ?")
+            except sr.RequestError:
+                st.error("Erreur de connexion au service vocal de Google.")
+
+# ==============================================================
+# QUESTION 2 (SYMPTÔMES)
+# ==============================================================
+elif st.session_state.etape_consultation == 2:
+    st.markdown("### 🤖 Étape 1 : Assistant Médical Vocal")
+    st.success(f"🚭 **Tabagisme :** '{st.session_state.fumeur_text}'")
+    st.warning("🗣️ L'IA : 'D'accord, c'est noté. Pouvez-vous maintenant me décrire vos symptômes ?'")
+    
+    audio_symptomes = st.audio_input("🎤 Décrivez vos symptômes (ex: 'Je tousse et j'ai de la fièvre')")
+    
+    if audio_symptomes is not None:
+        with st.spinner("L'IA transcrit votre voix..."):
+            r = sr.Recognizer()
+            with sr.AudioFile(audio_symptomes) as source:
+                audio_data_sr = r.record(source)
+            try:
+                texte_transcrit = r.recognize_google(audio_data_sr, language="fr-FR")
+                st.session_state.symptomes_text = texte_transcrit
+                
+                # On prépare le passage à l'auscultation
+                reponse_ia = "Merci pour ces informations. Veuillez maintenant placer le stéthoscope sur votre poitrine, et respirez profondément par la bouche pendant 5 secondes."
+                st.session_state.audio_ia_a_jouer = preparer_audio_ia(reponse_ia)
+                st.session_state.etape_consultation = 3
+                st.rerun()
+            except sr.UnknownValueError:
+                st.error("L'IA n'a pas bien compris. Pouvez-vous répéter ?")
+            except sr.RequestError:
+                st.error("Erreur de connexion au service vocal.")
+
+# ==============================================================
+# L'AUSCULTATION
+# ==============================================================
+elif st.session_state.etape_consultation >= 3:
+    col_recap1, col_recap2 = st.columns(2)
+    with col_recap1:
+        st.success(f"🚭 **Tabagisme :** '{st.session_state.fumeur_text}'")
+    with col_recap2:
+        st.success(f"🤒 **Symptômes :** '{st.session_state.symptomes_text}'")
+        
+    st.warning("🗣️ L'IA : 'Veuillez maintenant placer le stéthoscope sur votre poitrine...'")
+    
+    st.divider()
+    st.markdown("### 🩺 Étape 2 : Auscultation Connectée")
+    
+    choix_entree = st.radio("Acquisition du signal :", ["📂 Uploader une auscultation (.wav)", "🎤 Stéthoscope Connecté (Temps réel)"], horizontal=True)
+
+    audio_data = None
+    if choix_entree == "📂 Uploader une auscultation (.wav)":
+        audio_data = st.file_uploader("📥 Charger un fichier", type=["wav"])
+    else:
+        st.info("Le stéthoscope est activé. Enregistrez la respiration.")
+        audio_data = st.audio_input("Enregistrer l'auscultation")
+
+    # --- LE MOTEUR IA (CNN-BiLSTM + Grad-CAM + Snowflake) ---
+    if audio_data is not None:
+        mel_norm, mel_db = preparer_audio_exact(audio_data)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("📊 Signature Acoustique")
+            st.audio(audio_data, format='audio/wav')
+            fig, ax = plt.subplots(figsize=(10, 5))
+            librosa.display.specshow(mel_db, sr=22050, x_axis='time', y_axis='mel', ax=ax, cmap='inferno')
+            st.pyplot(fig)
+
+        with col2:
+            st.subheader("🧠 Pré-diagnostic IA")
+            tensor_input = torch.tensor(mel_norm[np.newaxis, np.newaxis, :, :], dtype=torch.float32)
+            
+            with st.spinner('Analyse des biomarqueurs en cours...'):
+                with torch.no_grad():
+                    outputs = model(tensor_input)
+                    probs = torch.softmax(outputs, dim=1)[0].numpy() * 100
+                
+                fig2, ax2 = plt.subplots(figsize=(6, 4))
+                ax2.barh(CLASSES, probs, color=['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd'])
+                ax2.set_xlabel('Probabilité (%)')
+                st.pyplot(fig2)
+                
+                idx = np.argmax(probs)
+                confiance = probs[idx]
+        
+        # -----------------------------------------------------
+        # BLOC GRAD-CAM (EXPLICABILITÉ)
+        # -----------------------------------------------------
+        st.divider()
+        with st.expander("🔍 Explicabilité de l'IA (Grad-CAM) - Pourquoi ce diagnostic ?", expanded=True):
+            st.markdown(f"**Analyse des biomarqueurs spatiaux pour la classe : `{CLASSES[idx]}`**")
+            st.caption("Cette carte de chaleur met en évidence les fréquences et les instants précis (en rouge/jaune) qui ont convaincu le réseau de neurones de son diagnostic.")
+            
+            cam_heatmap = generate_gradcam(model, tensor_input, idx)
+            
+            fig3, ax3 = plt.subplots(figsize=(10, 4))
+            img_bg = ax3.imshow(mel_db, aspect='auto', origin='lower', cmap='gray')
+            cam_heatmap_masked = np.ma.masked_where(cam_heatmap < 0.3, cam_heatmap)
+            img_heatmap = ax3.imshow(cam_heatmap_masked, aspect='auto', origin='lower', cmap='jet', alpha=0.6)
+            ax3.set_xlabel('Temps')
+            ax3.set_ylabel('Fréquence (Mel)')
+            st.pyplot(fig3)
+
+            # --- GÉNÉRATION DU RAPPORT CORTEX MULTIMODAL ---
+            max_y, max_x = np.unravel_index(np.argmax(cam_heatmap), cam_heatmap.shape)
+            temps_sec = (max_x / cam_heatmap.shape[1]) * 5.0
+            
+            if max_y < 42:
+                bande_freq = "basses fréquences"
+            elif max_y < 85:
+                bande_freq = "fréquences moyennes"
+            else:
+                bande_freq = "hautes fréquences"
+
+            if session is not None:
+                with st.spinner("Génération du rapport médical par LLM (Snowflake Cortex)..."):
+                    try:
+                        # PROMPT COMPLET
+                        prompt = f"Agis comme un pneumologue. Le patient a déclaré à l'oral être fumeur ('{st.session_state.fumeur_text}') et avoir ces symptômes ('{st.session_state.symptomes_text}'). L'IA stéthoscopique a détecté une probabilité de '{CLASSES[idx]}' (anomalie trouvée à {temps_sec:.1f}s dans les {bande_freq}). Rédige un compte-rendu clinique de 3 phrases maximum en fusionnant ses antécédents, ses symptômes vocaux et l'analyse audio."
+                        prompt_sql = prompt.replace("'", "''") 
+                        query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('mistral-large', '{prompt_sql}')"
+                        
+                        rapport_genere = session.sql(query).collect()[0][0]
+                        st.success("🤖 **Rapport IA (Snowflake Cortex) :**")
+                        st.write(rapport_genere)
+                    except Exception as e:
+                        st.warning(f"L'analyse mathématique pointe une anomalie à {temps_sec:.1f}s ({bande_freq}).")
+
+        # -----------------------------------------------------
+        # SYNTHÈSE CLINIQUE ET SNOWFLAKE DB
+        # -----------------------------------------------------
+        st.divider()
+        st.markdown("### 📋 Synthèse Clinique & Sévérité Multimodale")
+        
+        severite = "LÉGER"
+        couleur = "green"
+        
+        if CLASSES[idx] in ['Pneumonie', 'BPCO', 'Asthme']:
+            if spo2 < 92 or temperature > 38.5:
+                severite = "SÉVÈRE (Alerte Rouge)"
+                couleur = "red"
+            elif spo2 < 95 or temperature > 37.8:
+                severite = "MODÉRÉ (Alerte Orange)"
+                couleur = "orange"
+                
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.metric(label="Diagnostic principal ciblé", value=f"{CLASSES[idx]}", delta=f"Confiance IA : {confiance:.1f}%")
+            st.markdown(f"**Niveau de Sévérité estimé :** :{couleur}[{severite}]")
+            
+            if st.button("💾 Synchroniser avec le dossier Patient (Snowflake)"):
+                if session is not None: 
+                    try:
+                        p_json = json.dumps({CLASSES[i]: float(probs[i]) for i in range(5)})
+                        session.sql(f"""
+                            INSERT INTO PREDICTIONS (PHARMACIE_ID, CLASSE_PREDITE, PROBABILITES, CONFIANCE)
+                            SELECT 'CABINE_TEST', '{CLASSES[idx]}', PARSE_JSON('{p_json}'), {float(confiance)}
+                        """).collect()
+                        st.toast('✅ Données enregistrées dans Snowflake avec succès !')
+                    except Exception as e:
+                        st.error(f"Erreur Snowflake : {e}")
                 else:
-                    st.info("Aucun historique patient disponible dans la base de données. Sauvegardez une prédiction pour commencer le suivi.")
-            except Exception as e:
-                st.error(f"Erreur lors de la récupération de l'historique : {e}")
-        else:
-            st.info("🖥️ Mode Local Actif : Historique désactivé. Connectez-vous à Snowflake pour voir le suivi.")
+                    st.error("⚠️ Sauvegarde impossible : non connecté à Snowflake.")
+
+        with col_b:
+            if severite == "SÉVÈRE (Alerte Rouge)":
+                st.error("🚨 DÉTRESSE RESPIRATOIRE SUSPECTÉE.\n- Redirection immédiate vers les urgences (15).")
+            elif severite == "MODÉRÉ (Alerte Orange)":
+                st.warning("⚠️ ANOMALIE CLINIQUE CONFIRMÉE.\n- Téléconsultation prioritaire requise.")
+            else:
+                st.success("✅ PARAMÈTRES NORMAUX ou CONSTANTES STABLES.")
+        
+        # --- DASHBOARD ---
+        with st.expander("📈 Voir l'historique pulmonaire du patient (Extraction Snowflake en temps réel)"):
+            if session is not None:
+                try:
+                    query = """
+                        SELECT TIMESTAMP as "Date", PROBABILITES:Asthme::FLOAT as "Asthme", PROBABILITES:BPCO::FLOAT as "BPCO", PROBABILITES:Bronchite::FLOAT as "Bronchite", PROBABILITES:Pneumonie::FLOAT as "Pneumonie", PROBABILITES:Sain::FLOAT as "Sain"
+                        FROM PREDICTIONS ORDER BY TIMESTAMP ASC
+                    """
+                    df_history = session.sql(query).to_pandas()
+                    if not df_history.empty:
+                        df_history['Date'] = pd.to_datetime(df_history['Date'])
+                        df_history = df_history.set_index('Date')
+                        st.line_chart(df_history)
+                except Exception as e:
+                    pass
